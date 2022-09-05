@@ -59,18 +59,18 @@ def getGitBranch = { ->
 pact {
 	publish {
 		pactDirectory = 'build/pacts'
-		pactBrokerUrl = 'http://localhost:8000/'
-		pactBrokerUsername = 'pact_workshop'
-		pactBrokerPassword = 'pact_workshop'
-		tags = [getGitBranch(), 'test', 'prod']
-		consumerVersion = version.concat("+").concat(getGitHash())
+		pactBrokerUrl = 'http://pactbroker.dev.gazprombank.ru:8000'
+		pactBrokerUsername = 'pact'
+		pactBrokerPassword = 'pact'
+		tags = [getGitBranch()]
+		consumerVersion = "v".concat(version).concat("-").concat(getGitHash())
 	}
 	broker {
-		pactBrokerUrl = 'http://localhost:8000/'
+		pactBrokerUrl = 'http://pactbroker.dev.gazprombank.ru:8000'
 
 		// To use basic auth
-		pactBrokerUsername = 'pact_workshop'
-		pactBrokerPassword = 'pact_workshop'
+		pactBrokerUsername = 'pact'
+		pactBrokerPassword = 'pact'
 
 		// OR to use a bearer token
 		//pactBrokerToken = '<TOKEN>'
