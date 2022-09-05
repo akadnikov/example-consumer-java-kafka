@@ -1,0 +1,149 @@
+# This file is a template, and might need editing before it works on your project.
+# To contribute improvements to CI/CD templates, please follow the Development guide at:
+# https://docs.gitlab.com/ee/development/cicd/templates.html
+# This specific template is located at:
+# https://gitlab.com/gitlab-org/gitlab/-/blob/master/lib/gitlab/ci/templates/Getting-Started.gitlab-ci.yml
+
+# This is a sample GitLab CI/CD configuration file that should run without any modifications.
+# It demonstrates a basic 3 stage CI/CD pipeline. Instead of real tests or scripts,
+# it uses echo commands to simulate the pipeline execution.
+#
+# A pipeline is composed of independent jobs that run scripts, grouped into stages.
+# Stages run in sequential order, but jobs within stages run in parallel.
+#
+# For more information, see: https://docs.gitlab.com/ee/ci/yaml/index.html#stages
+#image: gradle:alpine
+
+# Disable the Gradle daemon for Continuous Integration servers as correctness
+# is usually a priority over speed in CI environments. Using a fresh
+# runtime for each build is more reliable since the runtime is completely
+# isolated from any previous builds.
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS && $CI_PIPELINE_SOURCE == "push"
+      when: never
+    - if: $CI_COMMIT_BRANCH
+
+variables:
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false"
+  DEPLOY_TO_ENV: "test"
+  PACTICIPANT: "pactflow-example-consumer-java-kafka"
+  PACT_BROKER_BASE_URL: "http://pactbroker.dev.gazprombank.ru:8000"
+  PACT_USER: "pact"
+  PACT_PASSWORD: "pact"
+
+before_script:
+  - GRADLE_USER_HOME="$(pwd)/.gradle"
+  - export GRADLE_USER_HOME
+
+stages:         
+  - getVersion
+  - build
+  #- isAlreadyPublished
+  - publishPact
+  - canIDeploy
+  - deploy
+
+getVersion-job:      
+  stage: getVersion
+  script:
+    - export gitTag="$(git describe --tags --abbrev=0)"
+    - export gitHash="$(git rev-parse --short HEAD)"
+    - export gitBranch="$CI_COMMIT_REF_NAME"
+    - export appVersion="$gitTag-$gitHash"
+    - echo "GIT_TAG=$gitTag" >> build.env
+    - echo "GIT_HASH=$gitHash" >> build.env
+    - echo "GIT_BRANCH=$gitBranch" >> build.env
+    - echo "APP_VERSION=$appVersion" >> build.env
+  artifacts:
+    reports:
+      dotenv: build.env 
+
+build-job:       
+  stage: build
+  script:
+    - echo "Build the code..."
+    - ./gradlew --build-cache test
+    - echo "Build complete."
+  dependencies:
+    - getVersion-job
+  artifacts:
+    paths:
+      - build/pacts/
+
+# isAlreadyPublished-job:     
+#   stage: isAlreadyPublished
+#   script:
+#     - http_code=$(curl -LI --insecure --request GET 'http://10.178.161.21:5050/pacticipants/$PACTICIPANT/versions/$APP_VERSION' -o /dev/null -w '%{http_code}\n' -s)
+#     - if [ $http_code -eq 200 ]; then echo "PUBLISH_PACT=false" >> build.env; else echo "PUBLISH_PACT=true"; fi
+#   dependencies:
+#     - getVersion-job
+    
+publishPact-job:       
+  stage: publishPact
+  # rules:
+  #   - if: '$PUBLISH_PACT == "false"'
+  #     when: never
+  #   - when: always
+  script:
+    - echo "Publish contract..."
+    - echo "consumer-app-version=$APP_VERSION"
+    - echo "branch=$GIT_BRANCH"
+    - ./pact/bin/pact-broker publish build/pacts --consumer-app-version=$APP_VERSION --branch=$GIT_BRANCH --broker-base-url=$PACT_BROKER_BASE_URL -u=$PACT_USER -p=$PACT_PASSWORD
+    - echo "Publish complete."
+  dependencies:
+    - getVersion-job
+    # - isAlreadyPublished-job
+    - build-job
+
+needProviderVerification:
+  stage: canIDeploy
+  script:
+    - ./pact/bin/pact-broker can-i-deploy --pacticipant=$PACTICIPANT --version=$APP_VERSION --pacticipant=pactflow-example-provider-java-kafka --branch=master --broker-base-url=http://pactbroker.dev.gazprombank.ru:8000 -u=pact -p=pact
+    - echo "NEED_PROVIDER_VERIFICATION=false" >> build.env
+  allow_failure: true   
+
+triggerProviderVerification:
+  stage: canIDeploy
+  needs: ["needProviderVerification"]
+  script:
+    - "curl -X POST -F token=8ca513e53eeac8090e91b9145c76ef -F ref=master http://gitlab.dev.gazprombank.ru/api/v4/projects/1898/trigger/pipeline"
+  dependencies:
+    - needProviderVerification
+  rules:     
+    - if: $NEED_PROVIDER_VERIFICATION != "false"
+canIDeploy-job:
+  stage: canIDeploy
+  script:
+    - echo "Can I deploy?"
+    - echo "version=$APP_VERSION"
+    - echo "pacticipant=$PACTICIPANT"
+    - echo "to-environment=$DEPLOY_TO_ENV"
+    - ./pact/bin/pact-broker can-i-deploy --pacticipant=$PACTICIPANT --to-environment=$DEPLOY_TO_ENV --version=$APP_VERSION --retry-while-unknown=18 --broker-base-url=$PACT_BROKER_BASE_URL -u=$PACT_USER -p=$PACT_PASSWORD
+    # - response=$(curl -o - -i --insecure --request GET "http://pactbroker.dev.gazprombank.ru:8000/can-i-deploy?pacticipant=$PACTICIPANT&version=$APP_VERSION&environment=$DEPLOY_TO_ENV")
+    # - echo $response
+    # - deploy=$(echo $response | grep -oP '(?<=\"deployable\":)\w+')
+    # - echo "deploy - $deploy"
+    # - if [ "$deploy" = "true" ]; then echo "you can deploy"; exit 0; else echo "you can't deploy"; exit 1; fi
+  dependencies:
+    - getVersion-job
+
+deploy-job:   
+  stage: deploy 
+  script:
+    - echo "Deploying application..."
+    - echo "version=$APP_VERSION"
+    - echo "pacticipant=$PACTICIPANT"
+    - echo "environment=$DEPLOY_TO_ENV"
+    - ./pact/bin/pact-broker record-deployment --pacticipant=$PACTICIPANT --version=$APP_VERSION --environment=$DEPLOY_TO_ENV --broker-base-url=$PACT_BROKER_BASE_URL -u=$PACT_USER -p=$PACT_PASSWORD
+    # - |
+    #   curl -u pact_workshop:pact_workshop -X PUT -i -H "Content-Type: application/json" -H "Accept: application/hal+json, application/json, */*; q=0.01" -H "X-Interface: HAL Browser" http://pactbroker.dev.gazprombank.ru:8000/pacticipants/$PACTICIPANT/versions/$APP_VERSION/tags/$DEPLOY_TO_ENV
+    - echo "Application successfully deployed."
+  dependencies:
+    - getVersion-job
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: never  
+    - if: $CI_COMMIT_BRANCH == "master"
